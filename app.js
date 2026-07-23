@@ -3,6 +3,7 @@ let stationMarkers = [];
 let soilMarkers = [];
 let isLoadingStations = false;
 let allSoilStations = null;
+let stationsByState = {}; // cache so we don't re-fetch the same state repeatedly
 
 function coloredIcon(color) {
     const colors = {
@@ -30,24 +31,70 @@ function coloredIcon(color) {
     });
 }
 
-// ---- NWS weather stations ----
-async function getStationsInBounds(bounds) {
-    // NWS API rejects coordinates with more than 4 decimal places, so round them
-    const west = bounds.getWest().toFixed(4);
-    const south = bounds.getSouth().toFixed(4);
-    const east = bounds.getEast().toFixed(4);
-    const north = bounds.getNorth().toFixed(4);
+// ---- Figure out which state a lat/lon is in ----
+async function getStateForPoint(lat, lon) {
+    try {
+        const res = await fetch(`https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data.properties.relativeLocation.properties.state; // e.g. "CO"
+    } catch (e) {
+        return null;
+    }
+}
 
-    const url = `https://api.weather.gov/stations?bbox=${west},${south},${east},${north}&limit=500`;
-    const res = await fetch(url);
+// ---- Get all stations for a state (cached) ----
+async function getStationsForState(stateCode) {
+    if (stationsByState[stateCode]) return stationsByState[stateCode];
 
+    const res = await fetch(`https://api.weather.gov/stations?state=${stateCode}&limit=500`);
     if (!res.ok) {
-        console.error("NWS stations request failed:", res.status, url);
-        return []; // return empty list instead of crashing
+        stationsByState[stateCode] = [];
+        return [];
+    }
+    const data = await res.json();
+    stationsByState[stateCode] = data.features || [];
+    return stationsByState[stateCode];
+}
+
+// ---- Get every station relevant to the current map view ----
+async function getStationsInBounds(bounds) {
+    const center = bounds.getCenter();
+    const nw = bounds.getNorthWest();
+    const se = bounds.getSouthEast();
+
+    // Check the state at the center and both corners, in case the view spans states
+    const points = [center, nw, se];
+    const states = new Set();
+
+    for (const pt of points) {
+        const state = await getStateForPoint(pt.lat, pt.lng);
+        if (state) states.add(state);
     }
 
-    const data = await res.json();
-    return data.features || [];
+    let allStations = [];
+    for (const state of states) {
+        const stationsForState = await getStationsForState(state);
+        allStations = allStations.concat(stationsForState);
+    }
+
+    // De-duplicate by station ID
+    const seen = new Set();
+    const unique = [];
+    for (const s of allStations) {
+        const id = s.properties.stationIdentifier;
+        if (!seen.has(id)) {
+            seen.add(id);
+            unique.push(s);
+        }
+    }
+
+    // Only keep stations actually inside the visible map area
+    return unique.filter(s => {
+        const lon = s.geometry.coordinates[0];
+        const lat = s.geometry.coordinates[1];
+        return bounds.contains([lat, lon]);
+    });
 }
 
 function clearStationMarkers() {
@@ -62,18 +109,13 @@ async function getAllSoilStations() {
     try {
         const url = `https://wcc.sc.egov.usda.gov/awdbRestApi/services/v1/stations?elements=STO,SMS,PRCP&activeOnly=true`;
         const res = await fetch(url);
-
         if (!res.ok) {
-            console.error("NRCS stations request failed:", res.status);
             allSoilStations = [];
             return allSoilStations;
         }
-
         allSoilStations = await res.json();
         return allSoilStations;
-
     } catch (e) {
-        console.error("NRCS stations fetch error:", e);
         allSoilStations = [];
         return allSoilStations;
     }
@@ -82,7 +124,6 @@ async function getAllSoilStations() {
 async function getSoilData(stationTriplet) {
     const today = new Date().toISOString().split('T')[0];
     const url = `https://wcc.sc.egov.usda.gov/awdbRestApi/services/v1/data?stationTriplets=${stationTriplet}&elements=STO,SMS,PRCP&duration=DAILY&beginDate=${today}&endDate=${today}`;
-
     const res = await fetch(url);
     if (!res.ok) return null;
     return await res.json();
@@ -105,10 +146,7 @@ async function loadSoilStationsForView(bounds) {
         const all = await getAllSoilStations();
         if (!all || all.length === 0) return;
 
-        const inView = all.filter(s =>
-            bounds.contains([s.latitude, s.longitude])
-        );
-
+        const inView = all.filter(s => bounds.contains([s.latitude, s.longitude]));
         clearSoilMarkers();
 
         const checks = inView.slice(0, 15).map(async station => {
@@ -141,14 +179,10 @@ async function loadSoilStationsForView(bounds) {
                     ${lines.join('<br>')}
                 `);
                 soilMarkers.push(marker);
-
-            } catch (e) {
-                // this station failed, skip it
-            }
+            } catch (e) {}
         });
 
         await Promise.all(checks);
-
     } catch (err) {
         console.error("Soil station error:", err);
     }
@@ -206,12 +240,10 @@ async function loadStationsForView() {
                     🌧 Precip (last hr): ${precipIn !== null ? precipIn + 'in' : 'N/A'}
                 `);
                 stationMarkers.push(marker);
-
             } catch (e) {}
         });
 
         await Promise.all(checks);
-
         await loadSoilStationsForView(bounds);
 
         document.getElementById("info").innerHTML = `
