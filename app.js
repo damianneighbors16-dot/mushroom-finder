@@ -102,6 +102,48 @@ function clearStationMarkers() {
     stationMarkers = [];
 }
 
+async function getLatestStationObservation(stationId) {
+    const latestUrl = `https://api.weather.gov/stations/${stationId}/observations/latest`;
+    try {
+        const latestRes = await fetch(latestUrl);
+        if (latestRes.ok) {
+            const latestData = await latestRes.json();
+            return latestData.properties || null;
+        }
+
+        if (latestRes.status !== 404) {
+            console.debug(`Station ${stationId} latest obs returned ${latestRes.status}`);
+        }
+
+        const now = new Date();
+        const end = now.toISOString();
+        const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const fallbackUrl = `https://api.weather.gov/stations/${stationId}/observations?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&limit=50`;
+
+        const fallbackRes = await fetch(fallbackUrl);
+        if (!fallbackRes.ok) {
+            console.debug(`Station ${stationId} observations fallback returned ${fallbackRes.status}`);
+            return null;
+        }
+
+        const fallbackData = await fallbackRes.json();
+        if (!fallbackData.features || fallbackData.features.length === 0) return null;
+
+        const latestFeature = fallbackData.features.reduce((latest, feature) => {
+            if (!feature || !feature.properties) return latest;
+            if (!latest) return feature;
+            const currentTs = new Date(feature.properties.timestamp).getTime();
+            const latestTs = new Date(latest.properties.timestamp).getTime();
+            return currentTs > latestTs ? feature : latest;
+        }, null);
+
+        return latestFeature ? latestFeature.properties : null;
+    } catch (e) {
+        console.debug(`Station ${stationId} observation error:`, e);
+        return null;
+    }
+}
+
 // ---- NRCS SNOTEL/SCAN stations ----
 async function getAllSoilStations() {
     if (allSoilStations) return allSoilStations;
@@ -210,16 +252,7 @@ async function loadStationsForView() {
             const stationId = station.properties.stationIdentifier;
 
             try {
-                const obs = await fetch(`https://api.weather.gov/stations/${stationId}/observations/latest`);
-                if (!obs.ok) {
-                    if (obs.status !== 404) {
-                        console.debug(`Station ${stationId} latest obs returned ${obs.status}`);
-                    }
-                    return;
-                }
-
-                const obsData = await obs.json();
-                const p = obsData.properties;
+                const p = await getLatestStationObservation(stationId);
                 if (!p) return;
 
                 let tempF = null;
