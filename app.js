@@ -30,16 +30,24 @@ function coloredIcon(color) {
     });
 }
 
-// ---- NWS weather stations (air temp, humidity, precip) ----
+// ---- NWS weather stations ----
 async function getStationsInBounds(bounds) {
-    const west = bounds.getWest();
-    const south = bounds.getSouth();
-    const east = bounds.getEast();
-    const north = bounds.getNorth();
+    // NWS API rejects coordinates with more than 4 decimal places, so round them
+    const west = bounds.getWest().toFixed(4);
+    const south = bounds.getSouth().toFixed(4);
+    const east = bounds.getEast().toFixed(4);
+    const north = bounds.getNorth().toFixed(4);
+
     const url = `https://api.weather.gov/stations?bbox=${west},${south},${east},${north}&limit=500`;
     const res = await fetch(url);
+
+    if (!res.ok) {
+        console.error("NWS stations request failed:", res.status, url);
+        return []; // return empty list instead of crashing
+    }
+
     const data = await res.json();
-    return data.features;
+    return data.features || [];
 }
 
 function clearStationMarkers() {
@@ -47,24 +55,37 @@ function clearStationMarkers() {
     stationMarkers = [];
 }
 
-// ---- NRCS SNOTEL/SCAN stations (soil temp, soil moisture, precip) ----
+// ---- NRCS SNOTEL/SCAN stations ----
 async function getAllSoilStations() {
     if (allSoilStations) return allSoilStations;
 
-    // STO = soil temp, SMS = soil moisture, PRCP = precipitation accumulation
-    const url = `https://wcc.sc.egov.usda.gov/awdbRestApi/services/v1/stations?elements=STO,SMS,PRCP&activeOnly=true`;
-    const res = await fetch(url);
-    const data = await res.json();
-    allSoilStations = data;
-    return data;
+    try {
+        const url = `https://wcc.sc.egov.usda.gov/awdbRestApi/services/v1/stations?elements=STO,SMS,PRCP&activeOnly=true`;
+        const res = await fetch(url);
+
+        if (!res.ok) {
+            console.error("NRCS stations request failed:", res.status);
+            allSoilStations = [];
+            return allSoilStations;
+        }
+
+        allSoilStations = await res.json();
+        return allSoilStations;
+
+    } catch (e) {
+        console.error("NRCS stations fetch error:", e);
+        allSoilStations = [];
+        return allSoilStations;
+    }
 }
 
 async function getSoilData(stationTriplet) {
     const today = new Date().toISOString().split('T')[0];
     const url = `https://wcc.sc.egov.usda.gov/awdbRestApi/services/v1/data?stationTriplets=${stationTriplet}&elements=STO,SMS,PRCP&duration=DAILY&beginDate=${today}&endDate=${today}`;
+
     const res = await fetch(url);
-    const data = await res.json();
-    return data;
+    if (!res.ok) return null;
+    return await res.json();
 }
 
 function clearSoilMarkers() {
@@ -82,6 +103,7 @@ function labelForElement(code) {
 async function loadSoilStationsForView(bounds) {
     try {
         const all = await getAllSoilStations();
+        if (!all || all.length === 0) return;
 
         const inView = all.filter(s =>
             bounds.contains([s.latitude, s.longitude])
@@ -120,7 +142,9 @@ async function loadSoilStationsForView(bounds) {
                 `);
                 soilMarkers.push(marker);
 
-            } catch (e) {}
+            } catch (e) {
+                // this station failed, skip it
+            }
         });
 
         await Promise.all(checks);
@@ -167,7 +191,7 @@ async function loadStationsForView() {
                 }
                 let precipIn = null;
                 if (p.precipitationLastHour && p.precipitationLastHour.value !== null) {
-                    precipIn = (p.precipitationLastHour.value / 25.4).toFixed(2); // mm to inches
+                    precipIn = (p.precipitationLastHour.value / 25.4).toFixed(2);
                 }
 
                 if (tempF === null && humidity === null) return;
