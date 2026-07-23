@@ -1,25 +1,45 @@
 let map;
 let stationMarkers = [];
+let soilMarkers = [];
 let isLoadingStations = false;
+let allSoilStations = null;
 
 function coloredIcon(color) {
-    return L.icon({
-        iconUrl: `https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-${color}.png`,
-        shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-        iconSize: [25, 41],
-        iconAnchor: [12, 41],
-        popupAnchor: [1, -34],
-        shadowSize: [41, 41]
+    const colors = {
+        green: '#2ecc71',
+        grey: '#95a5a6',
+        blue: '#3498db',
+        purple: '#9b59b6'
+    };
+    const fill = colors[color] || '#3388ff';
+
+    return L.divIcon({
+        className: '',
+        html: `<div style="
+            background:${fill};
+            width:16px;
+            height:16px;
+            border-radius:50% 50% 50% 0;
+            transform: rotate(-45deg);
+            border: 2px solid white;
+            box-shadow: 0 0 3px rgba(0,0,0,0.5);
+        "></div>`,
+        iconSize: [16, 16],
+        iconAnchor: [8, 16],
+        popupAnchor: [0, -16]
     });
 }
 
-async function findNearbyStations(lat, lon) {
-    const pointRes = await fetch(`https://api.weather.gov/points/${lat},${lon}`);
-    const pointData = await pointRes.json();
-    const stationsUrl = pointData.properties.observationStations;
-    const stationsRes = await fetch(stationsUrl);
-    const stationsData = await stationsRes.json();
-    return stationsData.features;
+// ---- NWS weather stations (air temp, humidity, precip) ----
+async function getStationsInBounds(bounds) {
+    const west = bounds.getWest();
+    const south = bounds.getSouth();
+    const east = bounds.getEast();
+    const north = bounds.getNorth();
+    const url = `https://api.weather.gov/stations?bbox=${west},${south},${east},${north}&limit=500`;
+    const res = await fetch(url);
+    const data = await res.json();
+    return data.features;
 }
 
 function clearStationMarkers() {
@@ -27,75 +47,162 @@ function clearStationMarkers() {
     stationMarkers = [];
 }
 
+// ---- NRCS SNOTEL/SCAN stations (soil temp, soil moisture, precip) ----
+async function getAllSoilStations() {
+    if (allSoilStations) return allSoilStations;
+
+    // STO = soil temp, SMS = soil moisture, PRCP = precipitation accumulation
+    const url = `https://wcc.sc.egov.usda.gov/awdbRestApi/services/v1/stations?elements=STO,SMS,PRCP&activeOnly=true`;
+    const res = await fetch(url);
+    const data = await res.json();
+    allSoilStations = data;
+    return data;
+}
+
+async function getSoilData(stationTriplet) {
+    const today = new Date().toISOString().split('T')[0];
+    const url = `https://wcc.sc.egov.usda.gov/awdbRestApi/services/v1/data?stationTriplets=${stationTriplet}&elements=STO,SMS,PRCP&duration=DAILY&beginDate=${today}&endDate=${today}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    return data;
+}
+
+function clearSoilMarkers() {
+    soilMarkers.forEach(m => map.removeLayer(m));
+    soilMarkers = [];
+}
+
+function labelForElement(code) {
+    if (code === 'STO') return 'Soil temp';
+    if (code === 'SMS') return 'Soil moisture';
+    if (code === 'PRCP') return 'Precipitation (accum.)';
+    return code;
+}
+
+async function loadSoilStationsForView(bounds) {
+    try {
+        const all = await getAllSoilStations();
+
+        const inView = all.filter(s =>
+            bounds.contains([s.latitude, s.longitude])
+        );
+
+        clearSoilMarkers();
+
+        const checks = inView.slice(0, 15).map(async station => {
+            try {
+                const dataRes = await getSoilData(station.stationTriplet);
+                if (!dataRes || !dataRes[0] || !dataRes[0].data) return;
+
+                let lines = [];
+                dataRes[0].data.forEach(d => {
+                    const code = d.stationElement.elementCode;
+                    const depth = d.stationElement.heightDepth;
+                    const values = d.values;
+                    if (values && values.length > 0) {
+                        const latest = values[values.length - 1];
+                        const label = labelForElement(code);
+                        const depthText = depth !== null && depth !== undefined ? ` @ ${depth}in` : '';
+                        lines.push(`${label}${depthText}: ${latest.value}`);
+                    }
+                });
+
+                if (lines.length === 0) return;
+
+                const marker = L.marker([station.latitude, station.longitude], {
+                    icon: coloredIcon('purple')
+                }).addTo(map);
+
+                marker.bindPopup(`
+                    <b>${station.name}</b><br>
+                    <small>SNOTEL/SCAN station</small><br><br>
+                    ${lines.join('<br>')}
+                `);
+                soilMarkers.push(marker);
+
+            } catch (e) {}
+        });
+
+        await Promise.all(checks);
+
+    } catch (err) {
+        console.error("Soil station error:", err);
+    }
+}
+
+// ---- Main load function ----
 async function loadStationsForView() {
     if (isLoadingStations) return;
     isLoadingStations = true;
 
     document.getElementById("info").innerHTML = `🔍 Loading stations for this view...`;
 
-    const center = map.getCenter();
     const bounds = map.getBounds();
 
     try {
-        const stations = await findNearbyStations(center.lat, center.lng);
-
+        const stations = await getStationsInBounds(bounds);
         clearStationMarkers();
 
         let onlineCount = 0;
 
-        // Check all stations found near the center
         const checks = stations.map(async station => {
             const stLon = station.geometry.coordinates[0];
             const stLat = station.geometry.coordinates[1];
             const name = station.properties.name;
             const stationId = station.properties.stationIdentifier;
 
-            // Skip stations outside the current visible map area
-            if (!bounds.contains([stLat, stLon])) return;
-
             try {
                 const obs = await fetch(`https://api.weather.gov/stations/${stationId}/observations/latest`);
+                if (!obs.ok) return;
                 const obsData = await obs.json();
                 const p = obsData.properties;
 
-                let tempF = "N/A";
-                if (p.temperature.value !== null) {
-                    tempF = (p.temperature.value * 9/5 + 32).toFixed(1);
+                let tempF = null;
+                if (p.temperature && p.temperature.value !== null) {
+                    tempF = Math.round(p.temperature.value * 9/5 + 32);
+                }
+                let humidity = null;
+                if (p.relativeHumidity && p.relativeHumidity.value !== null) {
+                    humidity = Math.round(p.relativeHumidity.value);
+                }
+                let precipIn = null;
+                if (p.precipitationLastHour && p.precipitationLastHour.value !== null) {
+                    precipIn = (p.precipitationLastHour.value / 25.4).toFixed(2); // mm to inches
                 }
 
-                let humidity = "N/A";
-                if (p.relativeHumidity.value !== null) {
-                    humidity = p.relativeHumidity.value.toFixed(0);
-                }
+                if (tempF === null && humidity === null) return;
 
-                // Only show it if it's actually online (has a temp reading)
-                if (tempF !== "N/A") {
-                    const marker = L.marker([stLat, stLon], { icon: coloredIcon('green') }).addTo(map);
-                    marker.bindPopup(`
-                        <b>${name}</b><br>
-                        🌡 Temp: ${tempF}°F<br>
-                        💧 Humidity: ${humidity}%
-                    `);
-                    stationMarkers.push(marker);
-                    onlineCount++;
-                }
-            } catch (e) {
-                // Station failed to respond, skip it
-            }
+                onlineCount++;
+
+                const marker = L.marker([stLat, stLon], { icon: coloredIcon('green') }).addTo(map);
+                marker.bindPopup(`
+                    <b>${name}</b><br>
+                    🌡 Temp: ${tempF !== null ? tempF + '°F' : 'N/A'}<br>
+                    💧 Humidity: ${humidity !== null ? humidity + '%' : 'N/A'}<br>
+                    🌧 Precip (last hr): ${precipIn !== null ? precipIn + 'in' : 'N/A'}
+                `);
+                stationMarkers.push(marker);
+
+            } catch (e) {}
         });
 
         await Promise.all(checks);
 
-        document.getElementById("info").innerHTML = `✅ ${onlineCount} online stations in view`;
+        await loadSoilStationsForView(bounds);
+
+        document.getElementById("info").innerHTML = `
+            ✅ ${onlineCount} weather stations<br>
+            🟣 ${soilMarkers.length} soil/moisture stations in view
+        `;
 
     } catch (err) {
         document.getElementById("info").innerHTML = `⚠️ Could not load station data`;
+        console.error(err);
     }
 
     isLoadingStations = false;
 }
 
-// Debounce so it doesn't fire too rapidly while dragging/zooming
 let moveTimeout;
 function onMapMoved() {
     clearTimeout(moveTimeout);
@@ -105,7 +212,6 @@ function onMapMoved() {
 navigator.geolocation.getCurrentPosition(
 
 function(position) {
-
     let lat = position.coords.latitude;
     let lon = position.coords.longitude;
 
@@ -115,17 +221,13 @@ function(position) {
         maxZoom: 19
     }).addTo(map);
 
-    L.marker([lat, lon], { icon: coloredIcon('red') })
+    L.marker([lat, lon], { icon: coloredIcon('blue') })
         .addTo(map)
         .bindPopup("📍 Your Location")
         .openPopup();
 
-    // Load stations for the initial view
     loadStationsForView();
-
-    // Reload stations whenever the map is panned or zoomed
     map.on('moveend', onMapMoved);
-
 },
 
 function() {
