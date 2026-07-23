@@ -257,17 +257,26 @@ async function loadStationsForView() {
                     precipIn = (p.precipitationLastHour.value / 25.4).toFixed(2);
                 }
 
-                if (tempF === null && humidity === null && precipIn === null) return;
+                const hasVisibleFields = tempF !== null || humidity !== null || precipIn !== null;
+                let popupHtml = `<b>${name}</b><br>`;
+
+                if (tempF !== null) {
+                    popupHtml += `🌡 Temp: ${tempF}°F<br>`;
+                }
+                if (humidity !== null) {
+                    popupHtml += `💧 Humidity: ${humidity}%<br>`;
+                }
+                if (precipIn !== null) {
+                    popupHtml += `🌧 Precip (last hr): ${precipIn}in<br>`;
+                }
+                if (!hasVisibleFields) {
+                    popupHtml += `<small>Latest NOAA observation available</small>`;
+                }
 
                 onlineCount++;
 
                 const marker = L.marker([stLat, stLon], { icon: coloredIcon('green') }).addTo(map);
-                marker.bindPopup(`
-                    <b>${name}</b><br>
-                    🌡 Temp: ${tempF !== null ? tempF + '°F' : 'N/A'}<br>
-                    💧 Humidity: ${humidity !== null ? humidity + '%' : 'N/A'}<br>
-                    🌧 Precip (last hr): ${precipIn !== null ? precipIn + 'in' : 'N/A'}
-                `);
+                marker.bindPopup(popupHtml);
                 stationMarkers.push(marker);
             } catch (e) {
                 console.debug(`Station ${stationId} observation error:`, e);
