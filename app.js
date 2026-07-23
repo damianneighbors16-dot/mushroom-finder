@@ -211,9 +211,16 @@ async function loadStationsForView() {
 
             try {
                 const obs = await fetch(`https://api.weather.gov/stations/${stationId}/observations/latest`);
-                if (!obs.ok) return;
+                if (!obs.ok) {
+                    if (obs.status !== 404) {
+                        console.debug(`Station ${stationId} latest obs returned ${obs.status}`);
+                    }
+                    return;
+                }
+
                 const obsData = await obs.json();
                 const p = obsData.properties;
+                if (!p) return;
 
                 let tempF = null;
                 if (p.temperature && p.temperature.value !== null) {
@@ -228,7 +235,7 @@ async function loadStationsForView() {
                     precipIn = (p.precipitationLastHour.value / 25.4).toFixed(2);
                 }
 
-                if (tempF === null && humidity === null) return;
+                if (tempF === null && humidity === null && precipIn === null) return;
 
                 onlineCount++;
 
@@ -240,7 +247,9 @@ async function loadStationsForView() {
                     🌧 Precip (last hr): ${precipIn !== null ? precipIn + 'in' : 'N/A'}
                 `);
                 stationMarkers.push(marker);
-            } catch (e) {}
+            } catch (e) {
+                console.debug(`Station ${stationId} observation error:`, e);
+            }
         });
 
         await Promise.all(checks);
