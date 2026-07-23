@@ -37,7 +37,7 @@ async function getStateForPoint(lat, lon) {
         const res = await fetch(`https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`);
         if (!res.ok) return null;
         const data = await res.json();
-        return data.properties.relativeLocation.properties.state; // e.g. "CO"
+        return data.properties.relativeLocation.properties.state;
     } catch (e) {
         return null;
     }
@@ -52,6 +52,7 @@ async function getStationsForState(stateCode) {
         stationsByState[stateCode] = [];
         return [];
     }
+
     const data = await res.json();
     stationsByState[stateCode] = data.features || [];
     return stationsByState[stateCode];
@@ -63,7 +64,6 @@ async function getStationsInBounds(bounds) {
     const nw = bounds.getNorthWest();
     const se = bounds.getSouthEast();
 
-    // Check the state at the center and both corners, in case the view spans states
     const points = [center, nw, se];
     const states = new Set();
 
@@ -78,7 +78,6 @@ async function getStationsInBounds(bounds) {
         allStations = allStations.concat(stationsForState);
     }
 
-    // De-duplicate by station ID
     const seen = new Set();
     const unique = [];
     for (const s of allStations) {
@@ -89,7 +88,6 @@ async function getStationsInBounds(bounds) {
         }
     }
 
-    // Only keep stations actually inside the visible map area
     return unique.filter(s => {
         const lon = s.geometry.coordinates[0];
         const lat = s.geometry.coordinates[1];
@@ -210,7 +208,9 @@ async function loadSoilStationsForView(bounds) {
                     ${lines.join('<br>')}
                 `);
                 soilMarkers.push(marker);
-            } catch (e) {}
+            } catch (e) {
+                console.debug(`Soil station ${station.stationTriplet} error:`, e);
+            }
         });
 
         await Promise.all(checks);
@@ -290,7 +290,6 @@ async function loadStationsForView() {
             ✅ ${onlineCount} weather stations<br>
             🟣 ${soilMarkers.length} soil/moisture stations in view
         `;
-
     } catch (err) {
         document.getElementById("info").innerHTML = `⚠️ Could not load station data`;
         console.error(err);
@@ -306,28 +305,26 @@ function onMapMoved() {
 }
 
 navigator.geolocation.getCurrentPosition(
+    function(position) {
+        let lat = position.coords.latitude;
+        let lon = position.coords.longitude;
 
-function(position) {
-    let lat = position.coords.latitude;
-    let lon = position.coords.longitude;
+        map = L.map('map').setView([lat, lon], 10);
 
-    map = L.map('map').setView([lat, lon], 10);
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19
+        }).addTo(map);
 
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19
-    }).addTo(map);
+        L.marker([lat, lon], { icon: coloredIcon('blue') })
+            .addTo(map)
+            .bindPopup("📍 Your Location")
+            .openPopup();
 
-    L.marker([lat, lon], { icon: coloredIcon('blue') })
-        .addTo(map)
-        .bindPopup("📍 Your Location")
-        .openPopup();
-
-    loadStationsForView();
-    map.on('moveend', onMapMoved);
-},
-
-function() {
-    document.getElementById("info").innerHTML = "Could not find location";
-}
-
+        loadStationsForView();
+        map.on('moveend', onMapMoved);
+    },
+    function() {
+        document.getElementById("info").innerHTML = "Could not find location";
+    }
 );
+
